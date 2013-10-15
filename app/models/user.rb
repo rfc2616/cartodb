@@ -61,6 +61,11 @@ class User < Sequel::Model
     end
   end
 
+  def after_initialize
+    super
+    self.database_host ||= ::Rails::Sequel.configuration.environment_for(Rails.env)['host']
+  end
+
   ## Callbacks
   def after_create
     super
@@ -75,6 +80,7 @@ class User < Sequel::Model
     super
     changes = (self.previous_changes.present? ? self.previous_changes.keys : [])
     set_statement_timeouts if changes.include?(:user_timeout) || changes.include?(:database_timeout)
+    save_metadata
   end
 
   def before_destroy
@@ -191,18 +197,25 @@ class User < Sequel::Model
     logger = (Rails.env.development? || Rails.env.test? ? ::Rails.logger : nil)
     if user == :superuser
       ::Rails::Sequel.configuration.environment_for(Rails.env).merge(
-        'database' => self.database_name, :logger => logger
-      )
+        'database' => self.database_name,
+        :logger => logger,
+        'host' => self.database_host
+      ) {|key, o, n| n.nil? ? o : n}
     elsif user == :public_user
       ::Rails::Sequel.configuration.environment_for(Rails.env).merge(
-        'database' => self.database_name, :logger => logger,
-        'username' => CartoDB::PUBLIC_DB_USER, 'password' => ''
-      )
+        'database' => self.database_name,
+        :logger => logger,
+        'username' => CartoDB::PUBLIC_DB_USER, 'password' => '',
+        'host' => self.database_host
+      ) {|key, o, n| n.nil? ? o : n}
     else
       ::Rails::Sequel.configuration.environment_for(Rails.env).merge(
-        'database' => self.database_name, :logger => logger,
-        'username' => database_username, 'password' => database_password
-      )
+        'database' => self.database_name,
+        :logger => logger,
+        'username' => database_username, 
+        'password' => database_password,
+        'host' => self.database_host
+      ) {|key, o, n| n.nil? ? o : n}
     end
   end
 
@@ -333,7 +346,7 @@ class User < Sequel::Model
 
   # save users basic metadata to redis for node sql api to use
   def save_metadata
-    $users_metadata.HMSET key, 'id', id, 'database_name', database_name
+    $users_metadata.HMSET key, 'id', id, 'database_name', database_name, 'database_host', database_host
     self.set_map_key
   end
 
@@ -640,7 +653,10 @@ class User < Sequel::Model
       self.this.update database_name: self.database_name
 
       Thread.new do
-        conn = Rails::Sequel.connection
+        connection_params = ::Rails::Sequel.configuration.environment_for(Rails.env).merge(
+          'host' => self.database_host
+        ) {|key, o, n| n.nil? ? o : n}
+        conn = ::Sequel.connect(connection_params)
         begin
           conn.run("CREATE USER #{database_username} PASSWORD '#{database_password}'")
         rescue => e
